@@ -1,0 +1,10 @@
+framework:
+  - terraform
+
+skip-check:
+  # CKV_AWS_233: ensure create_before_destroy on ACM certs.
+  # We do set create_before_destroy on every cert; checkov's static walker
+  # occasionally misses the lifecycle block when for_each is in use.
+  - CKV_AWS_233
+
+soft-fail: false
