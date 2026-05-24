@@ -1,9 +1,32 @@
 locals {
-  region_code = format(
-    "%s%s",
-    substr(replace(var.region, "-", ""), 0, length(replace(var.region, "-", "")) - 1),
-    substr(var.region, length(var.region) - 1, 1),
-  )
+  # S-1 fix: explicit region→short-code map (no derivation tricks).
+  # Adding a new region = adding a line here.
+  region_code_map = {
+    "us-east-1"      = "use1"
+    "us-east-2"      = "use2"
+    "us-west-1"      = "usw1"
+    "us-west-2"      = "usw2"
+    "eu-west-1"      = "euw1"
+    "eu-west-2"      = "euw2"
+    "eu-west-3"      = "euw3"
+    "eu-central-1"   = "euc1"
+    "eu-north-1"     = "eun1"
+    "eu-south-1"     = "eus1"
+    "ap-southeast-1" = "apse1"
+    "ap-southeast-2" = "apse2"
+    "ap-northeast-1" = "apne1"
+    "ap-northeast-2" = "apne2"
+    "ap-northeast-3" = "apne3"
+    "ap-south-1"     = "aps1"
+    "ap-east-1"      = "ape1"
+    "ca-central-1"   = "cac1"
+    "ca-west-1"      = "caw1"
+    "sa-east-1"      = "sae1"
+    "me-south-1"     = "mes1"
+    "me-central-1"   = "mec1"
+    "af-south-1"     = "afs1"
+  }
+  region_code = local.region_code_map[var.region]
 
   primary_name = "${var.project}-${var.environment}-${local.region_code}"
 
@@ -28,31 +51,33 @@ locals {
     if contains(c.also_in_regions, "us-east-1") && var.region != "us-east-1"
   }
 
-  # Validation records (one per DVO across both primary + us-east-1 copies).
-  primary_validation_records = {
-    for dvo in flatten([
-      for k, c in aws_acm_certificate.this : [
-        for opt in c.domain_validation_options : {
+  # AC-C1 fix: the previous version's for_each key included the computed
+  # `dvo.resource_record_name`, which is unknown at plan time for new certs
+  # ("Invalid for_each argument: keys depend on values that cannot be
+  # determined until apply"). The fix keys for_each off (cert, domain) tuples
+  # derived from var.certificates inputs — both fully known at plan time.
+  # The DVO attributes (record name/type/value) are looked up inside the
+  # aws_route53_record resource body, where computed values are allowed.
+  validation_entries = {
+    for entry in flatten([
+      for k, c in var.certificates : [
+        for d in distinct(concat([c.domain_name], c.subject_alternative_names)) : {
           cert_key = k
-          name     = opt.resource_record_name
-          type     = opt.resource_record_type
-          value    = opt.resource_record_value
+          domain   = d
         }
       ]
-    ]) : "${dvo.cert_key}::${dvo.name}" => dvo
+    ]) : "${entry.cert_key}::${entry.domain}" => entry
   }
 
-  us_east_1_validation_records = {
-    for dvo in flatten([
-      for k, c in aws_acm_certificate.us_east_1 : [
-        for opt in c.domain_validation_options : {
+  us_east_1_validation_entries = {
+    for entry in flatten([
+      for k, c in var.certificates : [
+        for d in distinct(concat([c.domain_name], c.subject_alternative_names)) : {
           cert_key = k
-          name     = opt.resource_record_name
-          type     = opt.resource_record_type
-          value    = opt.resource_record_value
+          domain   = d
         }
-      ]
-    ]) : "${dvo.cert_key}::us-east-1::${dvo.name}" => dvo
+      ] if contains(c.also_in_regions, "us-east-1") && var.region != "us-east-1"
+    ]) : "${entry.cert_key}::us-east-1::${entry.domain}" => entry
   }
 
   # Nested map: cert_key -> region -> ARN. Always includes the primary region;
@@ -89,12 +114,24 @@ resource "aws_acm_certificate" "this" {
 }
 
 resource "aws_route53_record" "validation" {
-  for_each = local.primary_validation_records
+  for_each = local.validation_entries
 
-  zone_id         = var.public_zone_id
-  name            = each.value.name
-  type            = each.value.type
-  records         = [each.value.value]
+  zone_id = var.public_zone_id
+  # AC-C1: look up the matching DVO at apply time. Each pluck filters the
+  # cert's domain_validation_options for the entry whose domain_name matches
+  # our static (cert_key, domain) tuple.
+  name = one([
+    for dvo in aws_acm_certificate.this[each.value.cert_key].domain_validation_options :
+    dvo.resource_record_name if dvo.domain_name == each.value.domain
+  ])
+  type = one([
+    for dvo in aws_acm_certificate.this[each.value.cert_key].domain_validation_options :
+    dvo.resource_record_type if dvo.domain_name == each.value.domain
+  ])
+  records = [one([
+    for dvo in aws_acm_certificate.this[each.value.cert_key].domain_validation_options :
+    dvo.resource_record_value if dvo.domain_name == each.value.domain
+  ])]
   ttl             = 60
   allow_overwrite = true
 }
@@ -137,12 +174,21 @@ resource "aws_acm_certificate" "us_east_1" {
 }
 
 resource "aws_route53_record" "validation_us_east_1" {
-  for_each = local.us_east_1_validation_records
+  for_each = local.us_east_1_validation_entries
 
-  zone_id         = var.public_zone_id
-  name            = each.value.name
-  type            = each.value.type
-  records         = [each.value.value]
+  zone_id = var.public_zone_id
+  name = one([
+    for dvo in aws_acm_certificate.us_east_1[each.value.cert_key].domain_validation_options :
+    dvo.resource_record_name if dvo.domain_name == each.value.domain
+  ])
+  type = one([
+    for dvo in aws_acm_certificate.us_east_1[each.value.cert_key].domain_validation_options :
+    dvo.resource_record_type if dvo.domain_name == each.value.domain
+  ])
+  records = [one([
+    for dvo in aws_acm_certificate.us_east_1[each.value.cert_key].domain_validation_options :
+    dvo.resource_record_value if dvo.domain_name == each.value.domain
+  ])]
   ttl             = 60
   allow_overwrite = true
 }

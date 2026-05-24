@@ -128,7 +128,7 @@ run "region_compression_ap_southeast_1" {
   }
 
   assert {
-    condition     = aws_acm_certificate.this["main"].tags["Name"] == "test-test-apsoutheast1-main"
+    condition     = aws_acm_certificate.this["main"].tags["Name"] == "test-test-apse1-main"
     error_message = "region compression should preserve the trailing digit"
   }
 }
